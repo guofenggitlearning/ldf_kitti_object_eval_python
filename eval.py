@@ -430,18 +430,19 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
 
     """
     CLASS_NAMES = ['car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'truck']
+
     MIN_HEIGHT = [40, 25, 25]
     MAX_OCCLUSION = [0, 1, 2]
     MAX_TRUNCATION = [0.15, 0.3, 0.5]
+    MAX_DISTANCE = [25.0, 50.0, 75.0]
+
     dc_bboxes, ignored_gt, ignored_dt = [], [], []
     current_cls_name = CLASS_NAMES[current_class].lower()
     num_gt = len(gt_anno["name"])
     num_dt = len(dt_anno["name"])
     num_valid_gt = 0
     for i in range(num_gt):
-        gt_bbox = gt_anno["bbox"][i]
         gt_name = gt_anno["name"][i].lower()
-        height = gt_bbox[3] - gt_bbox[1]
         if gt_name == current_cls_name:
             valid_class = 1
         elif gt_name == "Person_sitting".lower() and current_cls_name == "Pedestrian".lower():
@@ -450,11 +451,41 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
             valid_class = 0
         else:
             valid_class = -1
+
+        # ignore = False
+        # height = gt_anno["bbox"][i, 3] - gt_anno["bbox"][i, 1]
+        # if gt_anno["occluded"][i] > MAX_OCCLUSION[difficulty] or \
+        #         gt_anno["truncated"][i] > MAX_TRUNCATION[difficulty] or \
+        #         height <= MIN_HEIGHT[difficulty]:
+        #     ignore = True
+
+        # ignore = False
+        # height = gt_anno["bbox"][i, 3] - gt_anno["bbox"][i, 1]
+        # cur_diff = -1
+        # if gt_anno["occluded"][i] <= MAX_OCCLUSION[0] and gt_anno["truncated"][i] <= MAX_TRUNCATION[0] and \
+        #         height > MIN_HEIGHT[0]:
+        #     cur_diff = 0
+        # elif gt_anno["occluded"][i] <= MAX_OCCLUSION[1] and gt_anno["truncated"][i] <= MAX_TRUNCATION[1] and \
+        #         height > MIN_HEIGHT[1]:
+        #     cur_diff = 1
+        # elif gt_anno["occluded"][i] <= MAX_OCCLUSION[2] and gt_anno["truncated"][i] <= MAX_TRUNCATION[2] and \
+        #         height > MIN_HEIGHT[2]:
+        #     cur_diff = 2
+        # if cur_diff != difficulty:
+        #     ignore = True
+
         ignore = False
-        if gt_anno["occluded"][i] > MAX_OCCLUSION[difficulty] or \
-                gt_anno["truncated"][i] > MAX_TRUNCATION[difficulty] or \
-                height <= MIN_HEIGHT[difficulty]:
+        cur_diff = -1
+        distance = (gt_anno["location"][i, 0] ** 2 + gt_anno["location"][i, 2] ** 2) ** 0.5
+        if distance <= MAX_DISTANCE[0]:
+            cur_diff = 0
+        elif distance <= MAX_DISTANCE[1]:
+            cur_diff = 1
+        elif distance <= MAX_DISTANCE[2]:
+            cur_diff = 2
+        if cur_diff != difficulty:
             ignore = True
+
         if valid_class == 1 and not ignore:
             ignored_gt.append(0)
             num_valid_gt += 1
@@ -464,15 +495,22 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
             ignored_gt.append(-1)
         if gt_anno["name"][i] == "DontCare":
             dc_bboxes.append(gt_anno["bbox"][i])
+
     for i in range(num_dt):
         if dt_anno["name"][i].lower() == current_cls_name:
             valid_class = 1
         else:
             valid_class = -1
-        height = abs(dt_anno["bbox"][i, 3] - dt_anno["bbox"][i, 1])
-        if height < MIN_HEIGHT[difficulty]:
-            ignored_dt.append(1)
-        elif valid_class == 1:
+
+        # height = abs(dt_anno["bbox"][i, 3] - dt_anno["bbox"][i, 1])
+        # if height < MIN_HEIGHT[difficulty]:
+        #     ignored_dt.append(1)
+        # elif valid_class == 1:
+        #     ignored_dt.append(0)
+        # else:
+        #     ignored_dt.append(-1)
+
+        if valid_class == 1:
             ignored_dt.append(0)
         else:
             ignored_dt.append(-1)
@@ -585,6 +623,9 @@ def eval_class(gt_annos, dt_annos, current_classes, difficultys, metric, min_ove
             # total_num_valid_gt: int, the number of valid ground truth objects in all samples
             rets = _prepare_data(gt_annos, dt_annos, current_class, difficulty)
             gt_datas_list, dt_datas_list, ignored_gts, ignored_dts, dontcares, total_dc_num, total_num_valid_gt = rets
+            if metric == 0:
+                print('Valid ground truth objects of Class {:d} in Difficulty {:d}: {:d}'.format(
+                    current_class, difficulty, total_num_valid_gt))
 
             for k, min_overlap in enumerate(min_overlaps[:, metric, m]):
                 all_thresholds = []
