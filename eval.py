@@ -4,8 +4,41 @@ import numpy as np
 from rotate_iou import rotate_iou_gpu_eval
 
 
+def get_split_parts(num_sample, num_part):
+    """
+
+    Args:
+        num_sample: int, the number of total samples
+        num_part: int, a parameter for fast calculate algorithm
+
+    Returns:
+        split_parts: list of int
+
+    """
+    same_part = num_sample // num_part
+    remain_num = num_sample % num_part
+    if same_part == 0:
+        return [num_sample]
+
+    if remain_num == 0:
+        return [same_part] * num_part
+    else:
+        return [same_part] * num_part + [remain_num]
+
+
 @numba.jit
 def get_thresholds(scores: np.ndarray, num_gt, num_sample_pt=41):
+    """
+
+    Args:
+        scores: ndarray of float, [num_tp], scores of true positive detections
+        num_gt: int, the number of valid ground truth objects
+        num_sample_pt: int
+
+    Returns:
+        thresholds: list of float, sampled scores, the maximum length of which is num_sample_pt
+
+    """
     scores.sort()
     scores = scores[::-1]
     current_recall = 0
@@ -21,59 +54,6 @@ def get_thresholds(scores: np.ndarray, num_gt, num_sample_pt=41):
         thresholds.append(score)
         current_recall += 1 / (num_sample_pt - 1.0)
     return thresholds
-
-
-def clean_data(gt_anno, dt_anno, current_class, difficulty):
-    CLASS_NAMES = ['car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'truck']
-    DISTANT = [0, 10, 20, ]
-    MIN_HEIGHT = [40, 25, 25]
-    MAX_OCCLUSION = [0, 1, 2]
-    MAX_TRUNCATION = [0.15, 0.3, 0.5]
-    dc_bboxes, ignored_gt, ignored_dt = [], [], []
-    current_cls_name = CLASS_NAMES[current_class].lower()
-    num_gt = len(gt_anno["name"])
-    num_dt = len(dt_anno["name"])
-    num_valid_gt = 0
-    for i in range(num_gt):
-        bbox = gt_anno["bbox"][i]
-        gt_name = gt_anno["name"][i].lower()
-        height = bbox[3] - bbox[1]
-        if gt_name == current_cls_name:
-            valid_class = 1
-        elif current_cls_name == "Pedestrian".lower() and "Person_sitting".lower() == gt_name:
-            valid_class = 0
-        elif current_cls_name == "Car".lower() and "Van".lower() == gt_name:
-            valid_class = 0
-        else:
-            valid_class = -1
-        ignore = False
-        if gt_anno["occluded"][i] > MAX_OCCLUSION[difficulty] or \
-                gt_anno["truncated"][i] > MAX_TRUNCATION[difficulty] or \
-                height <= MIN_HEIGHT[difficulty]:
-            ignore = True
-        if valid_class == 1 and not ignore:
-            ignored_gt.append(0)
-            num_valid_gt += 1
-        elif valid_class == 0 or (ignore and valid_class == 1):
-            ignored_gt.append(1)
-        else:
-            ignored_gt.append(-1)
-        if gt_anno["name"][i] == "DontCare":
-            dc_bboxes.append(gt_anno["bbox"][i])
-    for i in range(num_dt):
-        if dt_anno["name"][i].lower() == current_cls_name:
-            valid_class = 1
-        else:
-            valid_class = -1
-        height = abs(dt_anno["bbox"][i, 3] - dt_anno["bbox"][i, 1])
-        if height < MIN_HEIGHT[difficulty]:
-            ignored_dt.append(1)
-        elif valid_class == 1:
-            ignored_dt.append(0)
-        else:
-            ignored_dt.append(-1)
-
-    return num_valid_gt, ignored_gt, ignored_dt, dc_bboxes
 
 
 @numba.jit(nopython=True)
@@ -177,8 +157,31 @@ def d3_box_overlap(boxes, qboxes, criterion=-1):
 
 
 @numba.jit(nopython=True)
-def compute_statistics_jit(overlaps, gt_datas, dt_datas, ignored_gt, ignored_det, dc_bboxes,
-                           metric, min_overlap, thresh=0, compute_fp=False, compute_aos=False):
+def compute_statistics_jit(overlaps, gt_datas, dt_datas, ignored_gt, ignored_dt, dc_bboxes,
+                           metric, min_overlap, score_thresh=0.0, compute_fp=False, compute_aos=False):
+    """
+
+    Args:
+        overlaps: ndarray of float, [num_gt, num_dt]
+        gt_datas: ndarray of float, [num_gt, 5], bboxes, alphas
+        dt_datas: ndarray of float, [num_dt, 6], bboxes, alphas, scores
+        ignored_gt: ndarray of int, [num_gt], 0: not ignored, 1: ignored, -1: unknown
+        ignored_dt: ndarray of int, [num_dt], 0: not ignored, 1: ignored, -1: unknown
+        dc_bboxes: ndarray of float, [num_dc, 4]
+        metric: int, the evaluation type, 0: bbox, 1: bev, 2: 3d
+        min_overlap: float
+        score_thresh: float
+        compute_fp: bool
+        compute_aos: bool
+
+    Returns:
+        tp: int, the number of true positive detections
+        fp: int, the number of false positive detections
+        fn: int, the number of false negative detections
+        similarity: float
+        thresholds: ndarray of float, [num_tp], scores of true positive detections
+
+    """
     gt_size = gt_datas.shape[0]
     dt_size = dt_datas.shape[0]
 
@@ -191,7 +194,7 @@ def compute_statistics_jit(overlaps, gt_datas, dt_datas, ignored_gt, ignored_det
     ignored_threshold = [False] * dt_size
     if compute_fp:
         for i in range(dt_size):
-            if dt_scores[i] < thresh:
+            if dt_scores[i] < score_thresh:
                 ignored_threshold[i] = True
     NO_DETECTION = -10000000
     tp, fp, fn, similarity = 0, 0, 0, 0
@@ -205,10 +208,10 @@ def compute_statistics_jit(overlaps, gt_datas, dt_datas, ignored_gt, ignored_det
         det_idx = -1
         valid_detection = NO_DETECTION
         max_overlap = 0
-        assigned_ignored_det = False
+        assigned_ignored_dt = False
 
         for j in range(dt_size):
-            if ignored_det[j] == -1:
+            if ignored_dt[j] == -1:
                 continue
             if assigned_detection[j]:
                 continue
@@ -219,21 +222,21 @@ def compute_statistics_jit(overlaps, gt_datas, dt_datas, ignored_gt, ignored_det
             if not compute_fp and overlap > min_overlap and dt_score > valid_detection:
                 det_idx = j
                 valid_detection = dt_score
-            elif compute_fp and overlap > min_overlap and (overlap > max_overlap or assigned_ignored_det) and \
-                    ignored_det[j] == 0:
+            elif compute_fp and overlap > min_overlap and (overlap > max_overlap or assigned_ignored_dt) and \
+                    ignored_dt[j] == 0:
                 max_overlap = overlap
                 det_idx = j
                 valid_detection = 1
-                assigned_ignored_det = False
+                assigned_ignored_dt = False
             elif compute_fp and overlap > min_overlap and valid_detection == NO_DETECTION and \
-                    ignored_det[j] == 1:
+                    ignored_dt[j] == 1:
                 det_idx = j
                 valid_detection = 1
-                assigned_ignored_det = True
+                assigned_ignored_dt = True
 
         if valid_detection == NO_DETECTION and ignored_gt[i] == 0:
             fn += 1
-        elif valid_detection != NO_DETECTION and (ignored_gt[i] == 1 or ignored_det[det_idx] == 1):
+        elif valid_detection != NO_DETECTION and (ignored_gt[i] == 1 or ignored_dt[det_idx] == 1):
             assigned_detection[det_idx] = True
         elif valid_detection != NO_DETECTION:
             tp += 1
@@ -245,7 +248,7 @@ def compute_statistics_jit(overlaps, gt_datas, dt_datas, ignored_gt, ignored_det
             assigned_detection[det_idx] = True
     if compute_fp:
         for i in range(dt_size):
-            if not (assigned_detection[i] or ignored_det[i] == -1 or ignored_det[i] == 1 or ignored_threshold[i]):
+            if not (assigned_detection[i] or ignored_dt[i] == -1 or ignored_dt[i] == 1 or ignored_threshold[i]):
                 fp += 1
         nstuff = 0
         if metric == 0:
@@ -254,7 +257,7 @@ def compute_statistics_jit(overlaps, gt_datas, dt_datas, ignored_gt, ignored_det
                 for j in range(dc_bboxes.shape[0]):
                     if assigned_detection[i]:
                         continue
-                    if ignored_det[i] == -1 or ignored_det[i] == 1:
+                    if ignored_dt[i] == -1 or ignored_dt[i] == 1:
                         continue
                     if ignored_threshold[i]:
                         continue
@@ -273,52 +276,51 @@ def compute_statistics_jit(overlaps, gt_datas, dt_datas, ignored_gt, ignored_det
     return tp, fp, fn, similarity, thresholds[:thresh_idx]
 
 
-def get_split_parts(num_sample, num_part):
+@numba.jit(nopython=True)
+def fused_compute_statistics(overlaps, pr, gt_nums, dt_nums, dc_nums, gt_datas, dt_datas, dontcares,
+                             ignored_gts, ignored_dts, metric, min_overlap, thresholds, compute_aos=False):
     """
 
     Args:
-        num_sample: int, the number of total samples
-        num_part: int, a parameter for fast calculate algorithm
+        overlaps: ndarray of float, [num_gt_per_part, num_dt_per_part]
+        pr: ndarray of int, [about 41, 4], all zeros
+        gt_nums: ndarray of int, [parted_num]
+        dt_nums: ndarray of int, [parted_num]
+        dc_nums: ndarray of int, [parted_num]
+        gt_datas: ndarray of float, [num_gt_per_part, 5], bboxes, alphas
+        dt_datas: ndarray of float, [num_dt_per_part, 6], bboxes, alphas, scores
+        dontcares: ndarray of float, [num_dc_per_part, 4]
+        ignored_gts: ndarray of int, [num_gt_per_part], 0: not ignored, 1: ignored, -1: unknown
+        ignored_dts: ndarray of int, [num_gt_per_part], 0: not ignored, 1: ignored, -1: unknown
+        metric: int, the evaluation type, 0: bbox, 1: bev, 2: 3d
+        min_overlap: float
+        thresholds: ndarray of float, [about 41], about 41 scores of true positive detections
+        compute_aos: bool
 
     Returns:
-        split_parts: list of int
 
     """
-    same_part = num_sample // num_part
-    remain_num = num_sample % num_part
-    if same_part == 0:
-        return [num_sample]
-
-    if remain_num == 0:
-        return [same_part] * num_part
-    else:
-        return [same_part] * num_part + [remain_num]
-
-
-@numba.jit(nopython=True)
-def fused_compute_statistics(overlaps, pr, gt_nums, dt_nums, dc_nums, gt_datas, dt_datas, dontcares,
-                             ignored_gts, ignored_dets, metric, min_overlap, thresholds, compute_aos=False):
     gt_num = 0
     dt_num = 0
     dc_num = 0
     for i in range(gt_nums.shape[0]):
-        for t, thresh in enumerate(thresholds):
+        for t, score_thresh in enumerate(thresholds):
             overlap = overlaps[gt_num:gt_num + gt_nums[i], dt_num:dt_num + dt_nums[i]]
             gt_data = gt_datas[gt_num:gt_num + gt_nums[i]]
             dt_data = dt_datas[dt_num:dt_num + dt_nums[i]]
             ignored_gt = ignored_gts[gt_num:gt_num + gt_nums[i]]
-            ignored_det = ignored_dets[dt_num:dt_num + dt_nums[i]]
+            ignored_dt = ignored_dts[dt_num:dt_num + dt_nums[i]]
             dontcare = dontcares[dc_num:dc_num + dc_nums[i]]
             tp, fp, fn, similarity, _ = compute_statistics_jit(
                 overlap,
                 gt_data,
                 dt_data,
                 ignored_gt,
-                ignored_det,
+                ignored_dt,
                 dontcare,
                 metric,
                 min_overlap=min_overlap,
-                thresh=thresh,
+                score_thresh=score_thresh,
                 compute_fp=True,
                 compute_aos=compute_aos)
             pr[t, 0] += tp
@@ -411,17 +413,107 @@ def calculate_iou_partly(gt_annos, dt_annos, metric, num_part=50):
     return overlaps, parted_overlaps, total_gt_num, total_dt_num
 
 
+def clean_data(gt_anno, dt_anno, current_class, difficulty):
+    """
+
+    Args:
+        gt_anno: dict, annotations per sample
+        dt_anno: dict, detected results per sample
+        current_class: int
+        difficulty: int
+
+    Returns:
+        num_valid_gt: int, the number of valid ground truth objects per sample
+        ignored_gt: list of int, the length is num_gt, 0: not ignored, 1: ignored, -1: unknown
+        ignored_dt: list of int, the length is num_dt, 0: not ignored, 1: ignored, -1: unknown
+        dc_bboxes: list of ndarray of float, [[4], ...], DontCare bboxes in annotations
+
+    """
+    CLASS_NAMES = ['car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'truck']
+    MIN_HEIGHT = [40, 25, 25]
+    MAX_OCCLUSION = [0, 1, 2]
+    MAX_TRUNCATION = [0.15, 0.3, 0.5]
+    dc_bboxes, ignored_gt, ignored_dt = [], [], []
+    current_cls_name = CLASS_NAMES[current_class].lower()
+    num_gt = len(gt_anno["name"])
+    num_dt = len(dt_anno["name"])
+    num_valid_gt = 0
+    for i in range(num_gt):
+        gt_bbox = gt_anno["bbox"][i]
+        gt_name = gt_anno["name"][i].lower()
+        height = gt_bbox[3] - gt_bbox[1]
+        if gt_name == current_cls_name:
+            valid_class = 1
+        elif gt_name == "Person_sitting".lower() and current_cls_name == "Pedestrian".lower():
+            valid_class = 0
+        elif gt_name == "Van".lower() and current_cls_name == "Car".lower():
+            valid_class = 0
+        else:
+            valid_class = -1
+        ignore = False
+        if gt_anno["occluded"][i] > MAX_OCCLUSION[difficulty] or \
+                gt_anno["truncated"][i] > MAX_TRUNCATION[difficulty] or \
+                height <= MIN_HEIGHT[difficulty]:
+            ignore = True
+        if valid_class == 1 and not ignore:
+            ignored_gt.append(0)
+            num_valid_gt += 1
+        elif valid_class == 0 or (ignore and valid_class == 1):
+            ignored_gt.append(1)
+        else:
+            ignored_gt.append(-1)
+        if gt_anno["name"][i] == "DontCare":
+            dc_bboxes.append(gt_anno["bbox"][i])
+    for i in range(num_dt):
+        if dt_anno["name"][i].lower() == current_cls_name:
+            valid_class = 1
+        else:
+            valid_class = -1
+        height = abs(dt_anno["bbox"][i, 3] - dt_anno["bbox"][i, 1])
+        if height < MIN_HEIGHT[difficulty]:
+            ignored_dt.append(1)
+        elif valid_class == 1:
+            ignored_dt.append(0)
+        else:
+            ignored_dt.append(-1)
+
+    return num_valid_gt, ignored_gt, ignored_dt, dc_bboxes
+
+
 def _prepare_data(gt_annos, dt_annos, current_class, difficulty):
+    """
+
+    Args:
+        gt_annos: list of dict, must from get_label_annos() in kitti_common.py
+        dt_annos: list of dict, must from get_label_annos() in kitti_common.py
+        current_class: int, 0: car, 1: pedestrian, 2: cyclist
+        difficulty: int, the evaluation difficulty, 0: easy, 1: normal, 2: hard
+
+    Returns:
+        gt_datas_list: list of ndarray of float, [[num_gt_per_sample, 5], ...], bboxes, alphas
+        dt_datas_list: list of ndarray of float, [[num_dt_per_sample, 6], ...], bboxes, alphas, scores
+        ignored_gts: list of ndarray of int, [[num_gt_per_sample], ...], 0: not ignored, 1: ignored, -1: unknown
+        ignored_dts: list of ndarray of int, [[num_dt_per_sample], ...], 0: not ignored, 1: ignored, -1: unknown
+        dontcares: list of ndarray of float, [[num_dc, 4], ...]
+        total_dc_num: ndarray of int, [num_sample], each of which is the number of DontCare bboxes per sample
+        total_num_valid_gt: int, the number of valid ground truth objects in all samples
+
+    """
     gt_datas_list = []
     dt_datas_list = []
     total_dc_num = []
-    ignored_gts, ignored_dets, dontcares = [], [], []
+    ignored_gts, ignored_dts, dontcares = [], [], []
     total_num_valid_gt = 0
     for i in range(len(gt_annos)):
+        # num_valid_gt: int, the number of valid ground truth objects per sample
+        # ignored_gt: list of int, the length is num_gt, 0: not ignored, 1: ignored, -1: unknown
+        # ignored_dt: list of int, the length is num_dt, 0: not ignored, 1: ignored, -1: unknown
+        # dc_bboxes: list of ndarray of float, [[4], ...], DontCare bboxes in annotations
         rets = clean_data(gt_annos[i], dt_annos[i], current_class, difficulty)
-        num_valid_gt, ignored_gt, ignored_det, dc_bboxes = rets
+        num_valid_gt, ignored_gt, ignored_dt, dc_bboxes = rets
+
         ignored_gts.append(np.array(ignored_gt, dtype=np.int64))
-        ignored_dets.append(np.array(ignored_det, dtype=np.int64))
+        ignored_dts.append(np.array(ignored_dt, dtype=np.int64))
         if len(dc_bboxes) == 0:
             dc_bboxes = np.zeros((0, 4)).astype(np.float64)
         else:
@@ -438,7 +530,7 @@ def _prepare_data(gt_annos, dt_annos, current_class, difficulty):
         gt_datas_list.append(gt_datas)
         dt_datas_list.append(dt_datas)
     total_dc_num = np.stack(total_dc_num, axis=0)
-    return gt_datas_list, dt_datas_list, ignored_gts, ignored_dets, dontcares, total_dc_num, total_num_valid_gt
+    return gt_datas_list, dt_datas_list, ignored_gts, ignored_dts, dontcares, total_dc_num, total_num_valid_gt
 
 
 def eval_class(gt_annos, dt_annos, current_classes, difficultys, metric, min_overlaps,
@@ -466,70 +558,87 @@ def eval_class(gt_annos, dt_annos, current_classes, difficultys, metric, min_ove
     num_example = len(gt_annos)
     split_parts = get_split_parts(num_example, num_part)
 
-    # overlaps: [[num_gt_per_sample, num_dt_per_sample], ...], the length is num_sample
-    # parted_overlaps: [[num_gt_per_part, num_dt_per_part], ...], the length is num_part
-    # total_gt_num: [num_example]
-    # total_dt_num: [num_example]
+    # overlaps: list of ndarray of float, [[num_gt_per_sample, num_dt_per_sample], ...], the length is num_sample
+    # parted_overlaps: list of ndarray of float, [[num_gt_per_part, num_dt_per_part], ...], the length is num_part
+    # total_gt_num: ndarray of int, [num_example]
+    # total_dt_num: ndarray of int, [num_example]
     rets = calculate_iou_partly(gt_annos, dt_annos, metric, num_part)
     overlaps, parted_overlaps, total_gt_num, total_dt_num = rets
+
     N_SAMPLE_PTS = 41
     num_minoverlap = len(min_overlaps)
     num_class = len(current_classes)
     num_difficulty = len(difficultys)
+
     precision = np.zeros([num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS])
     recall = np.zeros([num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS])
     aos = np.zeros([num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS])
+
     for m, current_class in enumerate(current_classes):
         for l, difficulty in enumerate(difficultys):
+            # gt_datas_list: list of ndarray of float, [[num_gt_per_sample, 5], ...], bboxes, alphas
+            # dt_datas_list: list of ndarray of float, [[num_dt_per_sample, 6], ...], bboxes, alphas, scores
+            # ignored_gts: list of ndarray of int, [[num_gt_per_sample], ...], 0: not ignored, 1: ignored, -1: unknown
+            # ignored_dts: list of ndarray of int, [[num_dt_per_sample], ...], 0: not ignored, 1: ignored, -1: unknown
+            # dontcares: list of ndarray of float, [[num_dc, 4], ...]
+            # total_dc_num: ndarray of int, [num_sample], each of which is the number of DontCare bboxes per sample
+            # total_num_valid_gt: int, the number of valid ground truth objects in all samples
             rets = _prepare_data(gt_annos, dt_annos, current_class, difficulty)
-            gt_datas_list, dt_datas_list, ignored_gts, ignored_dets, dontcares, total_dc_num, total_num_valid_gt = rets
+            gt_datas_list, dt_datas_list, ignored_gts, ignored_dts, dontcares, total_dc_num, total_num_valid_gt = rets
+
             for k, min_overlap in enumerate(min_overlaps[:, metric, m]):
-                thresholdss = []
+                all_thresholds = []
                 for i in range(len(gt_annos)):
+                    # tp: int, the number of true positive detections
+                    # fp: int, the number of false positive detections
+                    # fn: int, the number of false negative detections
+                    # similarity: float
+                    # thresholds: ndarray of float, [num_tp], scores of true positive detections
                     rets = compute_statistics_jit(
-                        overlaps[i],
-                        gt_datas_list[i],
-                        dt_datas_list[i],
-                        ignored_gts[i],
-                        ignored_dets[i],
-                        dontcares[i],
-                        metric,
-                        min_overlap=min_overlap,
-                        thresh=0.0,
-                        compute_fp=False)
+                        overlaps[i],  # [num_gt_per_sample, num_dt_per_sample]
+                        gt_datas_list[i],  # [num_gt_per_sample, 5]
+                        dt_datas_list[i],  # [num_dt_per_sample, 6]
+                        ignored_gts[i],  # [num_gt_per_sample]
+                        ignored_dts[i],  # [num_dt_per_sample]
+                        dontcares[i],  # [num_dc, 4]
+                        metric,  # int
+                        min_overlap=min_overlap,  # float
+                        score_thresh=0.0,  # float
+                        compute_fp=False,  # bool
+                    )
                     tp, fp, fn, similarity, thresholds = rets
-                    thresholdss += thresholds.tolist()
-                thresholdss = np.array(thresholdss)
-                thresholds = get_thresholds(thresholdss, total_num_valid_gt)
+                    all_thresholds += thresholds.tolist()
+                all_thresholds = np.array(all_thresholds)
+
+                # thresholds: list of float, sampled scores, the maximum length of which is 41
+                thresholds = get_thresholds(all_thresholds, total_num_valid_gt)
                 thresholds = np.array(thresholds)
+
+                # pr: ndarray of float, [about 41, 4], tp, fp, fn, similarity
                 pr = np.zeros([len(thresholds), 4])
                 idx = 0
                 for j, parted_num in enumerate(split_parts):
-                    gt_datas_part = np.concatenate(
-                        gt_datas_list[idx:idx + parted_num], 0)
-                    dt_datas_part = np.concatenate(
-                        dt_datas_list[idx:idx + parted_num], 0)
-                    dc_datas_part = np.concatenate(
-                        dontcares[idx:idx + parted_num], 0)
-                    ignored_dets_part = np.concatenate(
-                        ignored_dets[idx:idx + parted_num], 0)
-                    ignored_gts_part = np.concatenate(
-                        ignored_gts[idx:idx + parted_num], 0)
+                    gt_datas_part = np.concatenate(gt_datas_list[idx:idx + parted_num], 0)
+                    dt_datas_part = np.concatenate(dt_datas_list[idx:idx + parted_num], 0)
+                    dc_datas_part = np.concatenate(dontcares[idx:idx + parted_num], 0)
+                    ignored_gts_part = np.concatenate(ignored_gts[idx:idx + parted_num], 0)
+                    ignored_dts_part = np.concatenate(ignored_dts[idx:idx + parted_num], 0)
                     fused_compute_statistics(
-                        parted_overlaps[j],
-                        pr,
-                        total_gt_num[idx:idx + parted_num],
-                        total_dt_num[idx:idx + parted_num],
-                        total_dc_num[idx:idx + parted_num],
-                        gt_datas_part,
-                        dt_datas_part,
-                        dc_datas_part,
-                        ignored_gts_part,
-                        ignored_dets_part,
-                        metric,
-                        min_overlap=min_overlap,
-                        thresholds=thresholds,
-                        compute_aos=compute_aos)
+                        parted_overlaps[j],  # [num_gt_per_part, num_dt_per_part]
+                        pr,  # [about 41, 4]
+                        total_gt_num[idx:idx + parted_num],  # [parted_num]
+                        total_dt_num[idx:idx + parted_num],  # [parted_num]
+                        total_dc_num[idx:idx + parted_num],  # [parted_num]
+                        gt_datas_part,  # [num_gt_per_part, 5]
+                        dt_datas_part,  # [num_dt_per_part, 6]
+                        dc_datas_part,  # [num_dc_per_part, 4]
+                        ignored_gts_part,  # [num_gt_per_part]
+                        ignored_dts_part,  # [num_dt_per_part]
+                        metric,  # int
+                        min_overlap=min_overlap,  # float
+                        thresholds=thresholds,  # [about 41]
+                        compute_aos=compute_aos,  # bool
+                    )
                     idx += parted_num
                 for i in range(len(thresholds)):
                     recall[m, l, k, i] = pr[i, 0] / (pr[i, 0] + pr[i, 2])
@@ -579,6 +688,9 @@ def do_eval(gt_annos, dt_annos, current_classes, min_overlaps, compute_aos=False
     """
     difficultys = [0, 1, 2]
 
+    # ret['recall']: ndarray of float, [num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS]
+    # ret['precision']: ndarray of float, [num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS]
+    # ret['orientation']: ndarray of float, [num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS]
     ret = eval_class(gt_annos, dt_annos, current_classes, difficultys, 0, min_overlaps, compute_aos)
     mAP_bbox = get_mAP(ret["precision"])
     mAP_bbox_R40 = get_mAP_R40(ret["precision"])
@@ -620,7 +732,7 @@ def get_official_eval_result(gt_annos, dt_annos, current_classes):
                             [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
                             [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
                             ])
-    # min_overlaps: [num_minoverlap, num_metric, num_class]
+    # min_overlaps: ndarray of float, [num_minoverlap, num_metric, num_class]
     min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)
     class_to_name = {
         0: 'Car',
@@ -650,7 +762,7 @@ def get_official_eval_result(gt_annos, dt_annos, current_classes):
                 compute_aos = True
             break
 
-    # mAP result: [num_class, num_difficulty, num_minoverlap]
+    # mAP result: ndarray of float, [num_class, num_difficulty, num_minoverlap]
     mAPbbox, mAPbev, mAP3d, mAPaos, mAPbbox_R40, mAPbev_R40, mAP3d_R40, mAPaos_R40 = do_eval(
         gt_annos, dt_annos, current_classes, min_overlaps, compute_aos)
 
