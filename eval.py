@@ -431,10 +431,12 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
     """
     CLASS_NAMES = ['car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'truck']
 
-    MIN_HEIGHT = [40, 25, 25]
-    MAX_OCCLUSION = [0, 1, 2]
-    MAX_TRUNCATION = [0.15, 0.3, 0.5]
-    MAX_DISTANCE = [25.0, 50.0, 75.0]
+    # MIN_HEIGHT = [40, 25, 25]
+    # MAX_OCCLUSION = [0, 1, 2]
+    # MAX_TRUNCATION = [0.15, 0.3, 0.5]
+
+    MIN_DISTANCE = [0, 10, 20, 30, 40, 50, 60, 70]
+    MAX_DISTANCE = [10, 20, 30, 40, 50, 60, 70, 80]
 
     dc_bboxes, ignored_gt, ignored_dt = [], [], []
     current_cls_name = CLASS_NAMES[current_class].lower()
@@ -459,30 +461,13 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
         #         height <= MIN_HEIGHT[difficulty]:
         #     ignore = True
 
-        # ignore = False
-        # height = gt_anno["bbox"][i, 3] - gt_anno["bbox"][i, 1]
-        # cur_diff = -1
-        # if gt_anno["occluded"][i] <= MAX_OCCLUSION[0] and gt_anno["truncated"][i] <= MAX_TRUNCATION[0] and \
-        #         height > MIN_HEIGHT[0]:
-        #     cur_diff = 0
-        # elif gt_anno["occluded"][i] <= MAX_OCCLUSION[1] and gt_anno["truncated"][i] <= MAX_TRUNCATION[1] and \
-        #         height > MIN_HEIGHT[1]:
-        #     cur_diff = 1
-        # elif gt_anno["occluded"][i] <= MAX_OCCLUSION[2] and gt_anno["truncated"][i] <= MAX_TRUNCATION[2] and \
-        #         height > MIN_HEIGHT[2]:
-        #     cur_diff = 2
-        # if cur_diff != difficulty:
-        #     ignore = True
-
         ignore = False
         cur_diff = -1
         distance = (gt_anno["location"][i, 0] ** 2 + gt_anno["location"][i, 2] ** 2) ** 0.5
-        if distance <= MAX_DISTANCE[0]:
-            cur_diff = 0
-        elif distance <= MAX_DISTANCE[1]:
-            cur_diff = 1
-        elif distance <= MAX_DISTANCE[2]:
-            cur_diff = 2
+        for l in range(len(MAX_DISTANCE)):
+            if distance >= MIN_DISTANCE[l] and distance < MAX_DISTANCE[l]:
+                cur_diff = l
+                break
         if cur_diff != difficulty:
             ignore = True
 
@@ -623,6 +608,7 @@ def eval_class(gt_annos, dt_annos, current_classes, difficultys, metric, min_ove
             # total_num_valid_gt: int, the number of valid ground truth objects in all samples
             rets = _prepare_data(gt_annos, dt_annos, current_class, difficulty)
             gt_datas_list, dt_datas_list, ignored_gts, ignored_dts, dontcares, total_dc_num, total_num_valid_gt = rets
+
             if metric == 0:
                 print('Valid ground truth objects of Class {:d} in Difficulty {:d}: {:d}'.format(
                     current_class, difficulty, total_num_valid_gt))
@@ -713,13 +699,14 @@ def get_mAP_R40(prec):
     return sums / 40 * 100
 
 
-def do_eval(gt_annos, dt_annos, current_classes, min_overlaps, compute_aos=False):
+def do_eval(gt_annos, dt_annos, current_classes, difficultys, min_overlaps, compute_aos=False):
     """
 
     Args:
         gt_annos: list of dict, must from get_label_annos() in kitti_common.py
         dt_annos: list of dict, must from get_label_annos() in kitti_common.py
         current_classes: list of int, 0: car, 1: pedestrian, 2: cyclist
+        difficultys: list of int, the evaluation difficulty, 0: easy, 1: normal, 2: hard
         min_overlaps: ndarray of float, [num_minoverlap, num_metric, num_class]
         compute_aos: bool
 
@@ -727,8 +714,6 @@ def do_eval(gt_annos, dt_annos, current_classes, min_overlaps, compute_aos=False
         mAP result: ndarray of float, [num_class, num_difficulty, num_minoverlap]
 
     """
-    difficultys = [0, 1, 2]
-
     # ret['recall']: ndarray of float, [num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS]
     # ret['precision']: ndarray of float, [num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS]
     # ret['orientation']: ndarray of float, [num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS]
@@ -765,16 +750,6 @@ def get_official_eval_result(gt_annos, dt_annos, current_classes):
         result: str
 
     """
-    overlap_0_7 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5, 0.7],  # metric 0: bbox
-                            [0.7, 0.5, 0.5, 0.7, 0.5, 0.7],  # metric 1: bev
-                            [0.7, 0.5, 0.5, 0.7, 0.5, 0.7],  # metric 2: 3d
-                            ])
-    overlap_0_5 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5, 0.5],
-                            [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
-                            [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
-                            ])
-    # min_overlaps: ndarray of float, [num_minoverlap, num_metric, num_class]
-    min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)
     class_to_name = {
         0: 'Car',
         1: 'Pedestrian',
@@ -793,7 +768,22 @@ def get_official_eval_result(gt_annos, dt_annos, current_classes):
         else:
             current_classes_int.append(curcls)
     current_classes = current_classes_int
+
+    overlap_0_7 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5, 0.7],  # metric 0: bbox
+                            [0.7, 0.5, 0.5, 0.7, 0.5, 0.7],  # metric 1: bev
+                            [0.7, 0.5, 0.5, 0.7, 0.5, 0.7],  # metric 2: 3d
+                            ])
+    overlap_0_5 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5, 0.5],
+                            [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
+                            [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
+                            ])
+    # min_overlaps: ndarray of float, [num_minoverlap, num_metric, num_class]
+    min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)
     min_overlaps = min_overlaps[:, :, current_classes]
+
+    difficultys = [0, 1, 2, 3, 4, 5, 6, 7]
+    num_difficulty = len(difficultys)
+
     result = ''
     # check whether alpha is valid
     compute_aos = False
@@ -805,46 +795,48 @@ def get_official_eval_result(gt_annos, dt_annos, current_classes):
 
     # mAP result: ndarray of float, [num_class, num_difficulty, num_minoverlap]
     mAPbbox, mAPbev, mAP3d, mAPaos, mAPbbox_R40, mAPbev_R40, mAP3d_R40, mAPaos_R40 = do_eval(
-        gt_annos, dt_annos, current_classes, min_overlaps, compute_aos)
+        gt_annos, dt_annos, current_classes, difficultys, min_overlaps, compute_aos)
 
     for j, curcls in enumerate(current_classes):
         for i in range(min_overlaps.shape[0]):
             result += f'{class_to_name[curcls]} AP:\n'
-            result += f'bbox ({min_overlaps[i, 0, j]:.2f}): ' \
-                      f'{mAPbbox[j, 0, i]:.4f}, ' \
-                      f'{mAPbbox[j, 1, i]:.4f}, ' \
-                      f'{mAPbbox[j, 2, i]:.4f}\n'
-            result += f'bev  ({min_overlaps[i, 1, j]:.2f}): ' \
-                      f'{mAPbev[j, 0, i]:.4f}, ' \
-                      f'{mAPbev[j, 1, i]:.4f}, ' \
-                      f'{mAPbev[j, 2, i]:.4f}\n'
-            result += f'3d   ({min_overlaps[i, 2, j]:.2f}): ' \
-                      f'{mAP3d[j, 0, i]:.4f}, ' \
-                      f'{mAP3d[j, 1, i]:.4f}, ' \
-                      f'{mAP3d[j, 2, i]:.4f}\n'
+            result += f'bbox ({min_overlaps[i, 0, j]:.2f}): '
+            for l in range(num_difficulty):
+                result += f'{mAPbbox[j, l, i]:.4f}'
+                result += ', ' if l < num_difficulty - 1 else '\n'
+            result += f'bev  ({min_overlaps[i, 1, j]:.2f}): '
+            for l in range(num_difficulty):
+                result += f'{mAPbev[j, l, i]:.4f}'
+                result += ', ' if l < num_difficulty - 1 else '\n'
+            result += f'3d   ({min_overlaps[i, 2, j]:.2f}): '
+            for l in range(num_difficulty):
+                result += f'{mAP3d[j, l, i]:.4f}'
+                result += ', ' if l < num_difficulty - 1 else '\n'
+
             if compute_aos:
-                result += f'aos        : ' \
-                          f'{mAPaos[j, 0, i]:.2f}, ' \
-                          f'{mAPaos[j, 1, i]:.2f}, ' \
-                          f'{mAPaos[j, 2, i]:.2f}\n'
+                result += f'aos        : '
+                for l in range(num_difficulty):
+                    result += f'{mAPaos[j, l, i]:.4f}'
+                    result += ', ' if l < num_difficulty - 1 else '\n'
 
             result += f'{class_to_name[curcls]} AP_R40:\n'
-            result += f'bbox ({min_overlaps[i, 0, j]:.2f}): ' \
-                      f'{mAPbbox_R40[j, 0, i]:.4f}, ' \
-                      f'{mAPbbox_R40[j, 1, i]:.4f}, ' \
-                      f'{mAPbbox_R40[j, 2, i]:.4f}\n'
-            result += f'bev  ({min_overlaps[i, 1, j]:.2f}): ' \
-                      f'{mAPbev_R40[j, 0, i]:.4f}, ' \
-                      f'{mAPbev_R40[j, 1, i]:.4f}, ' \
-                      f'{mAPbev_R40[j, 2, i]:.4f}\n'
-            result += f'3d   ({min_overlaps[i, 2, j]:.2f}): ' \
-                      f'{mAP3d_R40[j, 0, i]:.4f}, ' \
-                      f'{mAP3d_R40[j, 1, i]:.4f}, ' \
-                      f'{mAP3d_R40[j, 2, i]:.4f}\n'
+            result += f'bbox ({min_overlaps[i, 0, j]:.2f}): '
+            for l in range(num_difficulty):
+                result += f'{mAPbbox_R40[j, l, i]:.4f}'
+                result += ', ' if l < num_difficulty - 1 else '\n'
+            result += f'bev  ({min_overlaps[i, 1, j]:.2f}): '
+            for l in range(num_difficulty):
+                result += f'{mAPbev_R40[j, l, i]:.4f}'
+                result += ', ' if l < num_difficulty - 1 else '\n'
+            result += f'3d   ({min_overlaps[i, 2, j]:.2f}): '
+            for l in range(num_difficulty):
+                result += f'{mAP3d_R40[j, l, i]:.4f}'
+                result += ', ' if l < num_difficulty - 1 else '\n'
+
             if compute_aos:
-                result += f'aos        : ' \
-                          f'{mAPaos_R40[j, 0, i]:.2f}, ' \
-                          f'{mAPaos_R40[j, 1, i]:.2f}, ' \
-                          f'{mAPaos_R40[j, 2, i]:.2f}\n'
+                result += f'aos        : '
+                for l in range(num_difficulty):
+                    result += f'{mAPaos_R40[j, l, i]:.4f}'
+                    result += ', ' if l < num_difficulty - 1 else '\n'
 
     return result
