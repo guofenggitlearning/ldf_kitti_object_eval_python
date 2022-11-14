@@ -1,4 +1,5 @@
 import fire
+import datetime
 
 import kitti_common as kitti
 from eval import get_official_eval_result
@@ -22,6 +23,10 @@ def evaluate(result_path,
     gt_annos = kitti.get_label_annos(label_path, val_image_ids)
     ap_result_str = get_official_eval_result(gt_annos, dt_annos, current_classes)
     print(ap_result_str)
+
+    log_file = 'results/log_eval_%s.txt' % datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    with open(log_file, 'a') as f:
+        f.write(ap_result_str)
 
 
 if __name__ == '__main__':
